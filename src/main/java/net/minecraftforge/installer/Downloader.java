@@ -42,6 +42,7 @@ public class Downloader {
     private final ProgressCallback monitor;
     private final String url;
     private String sha1, localPath;
+    private @Nullable String mirrorUrl;
 
     public Downloader(LocalSource localSource, ProgressCallback monitor, String url) {
         this.localSource = localSource;
@@ -56,6 +57,11 @@ public class Downloader {
 
     public Downloader localPath(@Nullable String localPath) {
         this.localPath = localPath;
+        return this;
+    }
+
+    public Downloader mirror(@Nullable String mirrorUrl) {
+        this.mirrorUrl = mirrorUrl;
         return this;
     }
 
@@ -115,32 +121,19 @@ public class Downloader {
             return false;
         }
 
-        monitor.message("Downloading library from " + url);
-        try {
-            URLConnection connection = DownloadUtils.getConnection(url);
-            if (connection != null) {
-                Files.copy(monitor.wrapStepDownload(connection), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
-
-                if (this.sha1 != null) {
-                    String sha1 = DownloadUtils.getSha1(target);
-                    if (Objects.equals(sha1, this.sha1)) {
-                        monitor.message("\tDownload completed: Checksum validated.");
-                        return true;
-                    }
-                    monitor.message("\tDownload failed: Checksum invalid, deleting file:");
-                    monitor.message("\t\tExpected: " + this.sha1);
-                    monitor.message("\t\tActual:   " + sha1);
-                    if (!target.delete()) {
-                        monitor.stage("\tFailed to delete file, aborting.");
-                        return false;
-                    }
-                } else {
-                    monitor.message("\tDownload completed: No checksum, Assuming valid.");
-                    return true;
-                }
+        // Try mirror first if available
+        String mirrorDownloadUrl = getMirrorDownloadUrl();
+        if (mirrorDownloadUrl != null) {
+            monitor.message("Downloading library from mirror " + mirrorDownloadUrl);
+            if (tryDownload(mirrorDownloadUrl, target)) {
+                return true;
             }
-        } catch (IOException e) {
-            LOGGER.log(Level.WARNING, e, () -> "Failed to download from " + url);
+            monitor.message("Mirror download failed, falling back to original URL");
+        }
+
+        monitor.message("Downloading library from " + url);
+        if (tryDownload(url, target)) {
+            return true;
         }
 
         return false;
@@ -158,7 +151,60 @@ public class Downloader {
             monitor.message("\tLibrary not cached, expecting download from " + url + ", but running in offline mode.");
             throw new RuntimeException("Running in offline mode, cannot download from " + url + ", cached version not found");
         }
+
+        String mirrorDownloadUrl = getMirrorDownloadUrl();
+        if (mirrorDownloadUrl != null) {
+            try {
+                URLConnection connection = DownloadUtils.getConnection(mirrorDownloadUrl);
+                if (connection != null) {
+                    return monitor.wrapStepDownload(connection);
+                }
+            } catch (IOException e) {
+                LOGGER.log(Level.WARNING, e, () -> "Failed to open stream from mirror " + mirrorDownloadUrl + ", falling back to original URL");
+            }
+        }
+
         return monitor.wrapStepDownload(DownloadUtils.getConnection(url));
+    }
+
+    private boolean tryDownload(String downloadUrl, File target) {
+        try {
+            URLConnection connection = DownloadUtils.getConnection(downloadUrl);
+            if (connection != null) {
+                Files.copy(monitor.wrapStepDownload(connection), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+
+                if (this.sha1 != null) {
+                    String sha1 = DownloadUtils.getSha1(target);
+                    if (Objects.equals(sha1, this.sha1)) {
+                        monitor.message("\tDownload completed: Checksum validated.");
+                        return true;
+                    }
+                    monitor.message("\tDownload failed: Checksum invalid, deleting file:");
+                    monitor.message("\t\tExpected: " + this.sha1);
+                    monitor.message("\t\tActual:   " + sha1);
+                    if (!target.delete()) {
+                        monitor.stage("\tFailed to delete file, aborting.");
+                    }
+                } else {
+                    monitor.message("\tDownload completed: No checksum, Assuming valid.");
+                    return true;
+                }
+            }
+        } catch (IOException e) {
+            LOGGER.log(Level.WARNING, e, () -> "Failed to download from " + downloadUrl);
+        }
+        return false;
+    }
+
+    @Nullable
+    private String getMirrorDownloadUrl() {
+        if (mirrorUrl == null || localPath == null) {
+            return null;
+        }
+        if (mirrorUrl.endsWith("/")) {
+            return mirrorUrl + localPath;
+        }
+        return mirrorUrl + "/" + localPath;
     }
 
     public static class LocalFile {
